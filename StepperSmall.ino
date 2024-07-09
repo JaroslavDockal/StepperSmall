@@ -13,7 +13,7 @@ TM1638 tm(CLK, DIO, STB);
 const int stepsPerRevolution = 2038;
 
 // Inicializace objektu AccelStepper pro krokový motor
-AccelStepper myStepper(AccelStepper::HALF4WIRE, 8, 10, 9, 11);
+AccelStepper myStepper(AccelStepper::FULL4WIRE, 8, 10, 9, 11);
 
 // Definice pinů pro koncové spínače
 const int endSwitch1Pin = 5;
@@ -35,9 +35,9 @@ float positionAngleRatio = 0;
 long referencePosition = 0;
 const float maxDegreesPerSecond = 2.5;
 const float stepsPerDegree = stepsPerRevolution / 360.0;
-const float maxStepsPerSecond = stepsPerDegree * maxDegreesPerSecond;
-const float initSpeed = stepsPerRevolution * 5; // Rychlost 1 otáčka za sekundu
-const float initAcceleration = stepsPerRevolution; // Akcelerace pro inicializaci
+float maxStepsPerSecond = stepsPerDegree * maxDegreesPerSecond;
+const float initSpeed = stepsPerRevolution; // Rychlost 1 otáčka za sekundu
+const float initAcceleration = stepsPerRevolution / 10; // Akcelerace pro inicializaci
 
 // Stavy tlačítek na TM1638
 const int atReferenceLED = 1;
@@ -49,22 +49,30 @@ const int initLED = 7;
 const int heartbeatLED = 8;
 
 // Stavy tlačítek na TM1638
-bool analogMode = true;
+bool analogMode = false;
+
+// Stringy do displaye
+const uint8_t calibration[] = {0x39, 0x77, 0x38, 0x80, 0x00, 0x00, 0x00, 0x00}; // CAL.
+const uint8_t calibrationDone[] = {0x39, 0x77, 0x38, 0x80, 0x5E, 0x3F, 0x54, 0x79}; // CAL.DONE
+const uint8_t callAbb[] = {0x39, 0x77, 0x38, 0x38, 0x00, 0x77, 0x7c, 0x7c}; // Call ABB
 
 void setup() {
   // Inicializace TM1638 modulu
   Serial.begin(115200);
   tm.reset();
-  tm.test();
   tm.displaySetBrightness(7);
 
   // Zavolání funkce pro zobrazení speciálního textu na TM1638 displeji
-  callAbb();
+  sendToDisplay(callAbb, sizeof(callAbb));
   delay(2000);
 
   // Inicializace pinů jako vstupy pro koncové spínače
   pinMode(endSwitch1Pin, INPUT_PULLUP);
   pinMode(endSwitch2Pin, INPUT_PULLUP);
+
+  // Temp for testing
+  myStepper.setMaxSpeed(initSpeed);
+  myStepper.setAcceleration(initAcceleration);
 
   // Inicializace pozice
   initializePosition();
@@ -73,28 +81,28 @@ void setup() {
 // Inicializace polohy motoru
 void initializePosition() {
   // Nastavení rychlosti a akcelerace pro inicializaci
-  myStepper.setMaxSpeed(initSpeed);
-  myStepper.setAcceleration(initAcceleration);
+  //myStepper.setMaxSpeed(initSpeed);
+  //myStepper.setAcceleration(initAcceleration);
 
   // Zapnutí LED při zahájení inicializace
   tm.writeLed(initLED, true);
 
-  // Zobrazení "CALIBRAT" na TM1638 displeji
-  const uint8_t calibration[] = {0x39, 0x77, 0x38, 0x06, 0x7C, 0x50, 0x77, 0x78};
-  for (uint8_t i = 0; i < sizeof(calibration); i++)
-    tm.displayDig(7 - i, calibration[i]);
+  // Zobrazení "CALIB..." na TM1638 displeji
+  sendToDisplay(calibration, sizeof(calibration));
 
-  // Simulace pohybu do jednoho směru, dokud není stisknuto tlačítko 5 (simulovaný koncový spínač 1)
-  bool maxReached = tm.getButtons() & 0x40;
-  while (!(tm.getButtons() & 0x01)) {
-    myStepper.moveTo(myStepper.currentPosition() + 1);
+  delay(2000);
+
+  // Simulace pohybu do jednoho směru, dokud není stisknuto tlačítko 6 (simulovaný koncový spínač 1)
+  while (!tm.getButton(6)) {
+    myStepper.moveTo(myStepper.currentPosition() + 100);
     myStepper.run();
+    //tm.displayVal(uint8_t digitId, uint8_t val);
   }
   maxPosition = currentPosition;
 
-  // Simulace pohybu do opačného směru, dokud není stisknuto tlačítko 6 (simulovaný koncový spínač 2)
-  while (!(tm.getButtons() & 0x02)) {
-    myStepper.moveTo(myStepper.currentPosition() - 1);
+  // Simulace pohybu do opačného směru, dokud není stisknuto tlačítko 5 (simulovaný koncový spínač 2)
+  while (!tm.getButton(5)) {
+    myStepper.moveTo(myStepper.currentPosition() - 100);
     myStepper.run();
   }
   minPosition = currentPosition;
@@ -108,6 +116,10 @@ void initializePosition() {
   positionRange = maxPosition - minPosition;
   angleRange = maxAngle - minAngle;
   positionAngleRatio = positionRange/angleRange;
+
+  maxStepsPerSecond = 2.5 * positionAngleRatio;
+
+  sendToDisplay(calibrationDone, sizeof(calibrationDone));
   
   delay(1000);
   tm.writeLed(initLED, false); // Vypnutí LED po dokončení inicializace
@@ -117,24 +129,28 @@ void loop() {
   int endSwitch1Input = digitalRead(endSwitch1Pin);
   int endSwitch2Input = digitalRead(endSwitch2Pin);
 
-  bool endSwitch1Active = (endSwitch1Input == LOW) | (tm.getButtons() & 0x01);
-  bool endSwitch2Active = (endSwitch1Input == LOW) | (tm.getButtons() & 0x02);
+  bool endSwitch1Active = (endSwitch1Input == LOW) | (tm.getButton(6));
+  bool endSwitch2Active = (endSwitch1Input == LOW) | (tm.getButton(5));
+
+  unsigned long currentMillis = millis();
+  bool delayInput = currentMillis % 200 >= 0 & currentMillis % 200 <= 10;
 
   // Nastavení maximální rychlosti a akcelerace pro běžný provoz
-  myStepper.setMaxSpeed(maxStepsPerSecond);
-  myStepper.setAcceleration(maxStepsPerSecond);
+  //myStepper.setMaxSpeed(maxStepsPerSecond);
+  //myStepper.setAcceleration(maxStepsPerSecond/10);
 
   // Aktualizace aktuální pozice
   currentPosition = myStepper.currentPosition();
-  actualAngle = currentPosition / stepsPerDegree;
+  //actualAngle = currentPosition / positionAngleRatio;
+  actualAngle = 0;
 
   // Kontrola tlačítka pro spuštění inicializační fáze (tlačítko 7 na TM1638 modulu)
-  if (tm.getButtons() & 0x80) {
+  if (tm.getButton(7)) {
     initializePosition();
   }
 
   // Kontrola tlačítek pro změnu referenčního úhlu a režimu
-   if (tm.getButtons() & 0x03) { // Tlačítko 4 na TM1638 modulu pro přepnutí mezi režimem
+   if (tm.getButton(3) & delayInput) { // Tlačítko 4 na TM1638 modulu pro přepnutí mezi režimem
     analogMode = !analogMode;
 
     // Reset referenčního úhlu při přepnutí do analogového režimu
@@ -144,53 +160,57 @@ void loop() {
   } 
 
   if (!analogMode) {  
-    if (tm.getButtons() & 0x02) { // Tlačítko 2 na TM1638 modulu pro zvýšení referenčního úhlu
-      referenceAngle = (referenceAngle + 1.0 > maxPosition) ? referenceAngle + 1.0 : maxPosition;
+    if (tm.getButton(1) & delayInput) { // Tlačítko 1 na TM1638 modulu pro zvýšení referenčního úhlu
+      referenceAngle = (referenceAngle + 1.0 > maxAngle) ? maxAngle : referenceAngle + 1.0;
     }
-    if (tm.getButtons() & 0x01) { // Tlačítko 1 na TM1638 modulu pro snížení referenčního úhlu
-      referenceAngle = (referenceAngle - 1.0 < maxPosition) ? referenceAngle - 1.0 : minPosition;
+    if (tm.getButton(0) & delayInput) { // Tlačítko 2 na TM1638 modulu pro snížení referenčního úhlu
+      referenceAngle = (referenceAngle - 1.0 < minAngle) ? minAngle : referenceAngle - 1.0;
     }
   }
 
   // Detekce, zda je aktuální úhel blízko referenčnímu úhlu
-  atReference = abs(referenceAngle - actualAngle) <= 0.5;
+  atReference = abs(referenceAngle - actualAngle) <= 0.1;
 
   referencePosition = ((referenceAngle - minAngle) * positionAngleRatio) - minPosition;
 
   // Pohyb motoru
   if (!atReference) {
-    bool runCwAllowed = !endSwitch1Active & !(currentPosition <= minPosition);
-    bool runCcwAllowed = !endSwitch2Active & !(currentPosition >= maxPosition);
+    //bool runCwAllowed = !endSwitch1Active & !(currentPosition <= minPosition);
+    //bool runCcwAllowed = !endSwitch2Active & !(currentPosition >= maxPosition);
+    bool runCwAllowed = true;
+    bool runCcwAllowed = true;
     if (referenceAngle < actualAngle & runCcwAllowed) {
-      myStepper.moveTo(referencePosition);
+      //myStepper.moveTo(referencePosition);
+      myStepper.moveTo(myStepper.currentPosition() + 100);
       rotationDirection = -1;
     } else if (referenceAngle > actualAngle & runCwAllowed) {
-      myStepper.moveTo(referencePosition);
+      //myStepper.moveTo(referencePosition);
+      myStepper.moveTo(myStepper.currentPosition() - 100);
       rotationDirection = 1;
     }
     myStepper.run();
 
   } else { 
     rotationDirection = 0;
-    myStepper.stop();
+    if (myStepper.isRunning()){
+      myStepper.stop();
+    }
   }  
 
   // Aktualizace indikace
   updateLedIndication();
   updateDisplayIndication(referenceAngle,actualAngle,rotationDirection);
 
-  // Zpoždění pro stabilizaci smyčky
-  delay(100);
 }
 
 // Funkce pro aktualizaci stavu LED TM1638
 void updateLedIndication() {
 
   // Zobrazení směru otáčení na TM1638
-  if (rotationDirection == 1) {
+  if (rotationDirection == -1) {
     tm.writeLed(cwLED, true); // CW
     tm.writeLed(ccwLED, false);
-  } else if (rotationDirection == -1){
+  } else if (rotationDirection == 1){
     tm.writeLed(cwLED, false);
     tm.writeLed(ccwLED, true); // CCW
   } else {
@@ -259,9 +279,9 @@ void updateDisplayIndication(float angleRef, float angleAct, int rotation) {
           display_data[4] = digit_codes[16]; // Space (no display)
   }
 
-  if (rotation == 1) {
+  if (rotation == -1) {
     display_data[4] += digit_codes[17 + rotationIndex]; // CW rotation
-  } else if (rotation == -1) {
+  } else if (rotation == 1) {
     display_data[4] += digit_codes[19 - rotationIndex]; // CW rotation
   } 
 
@@ -280,16 +300,7 @@ void updateDisplayIndication(float angleRef, float angleAct, int rotation) {
   display_data[7] = digit_codes[int(abs(angleAct) * 10) % 10];
 
   // Send data to display
-  for (int i = 0; i < 8; i++) {
-      tm.displayDig(7-i, display_data[i]);
-  }
-}
-
-
-void callAbb() {
-  const uint8_t callAbb[]={0x39,0x77,0x38,0x38,0x00,0x77,0x7c,0x7c};
-  for (uint8_t i=0;i<sizeof(callAbb);i++)
-    tm.displayDig(7-i, callAbb[i]);
+  sendToDisplay(display_data, sizeof(display_data));
 }
 
 bool blink(unsigned long interval){
@@ -303,4 +314,11 @@ bool blink(unsigned long interval){
   }
 
   return output;
+}
+
+// Ok, už je to 4x...
+void sendToDisplay(const uint8_t* message, uint8_t length) {
+    for (uint8_t i = 0; i < length; i++) {
+        tm.displayDig(7 - i, message[i]);
+    }
 }
