@@ -10,7 +10,7 @@
 TM1638 tm(CLK, DIO, STB);
 
 // Definice počtu kroků na jednu otáčku
-const int stepsPerRevolution = 2038;
+const int stepsPerRevolution = 64;
 
 // Inicializace objektu AccelStepper pro krokový motor
 AccelStepper myStepper(AccelStepper::FULL4WIRE, 8, 10, 9, 11);
@@ -18,6 +18,7 @@ AccelStepper myStepper(AccelStepper::FULL4WIRE, 8, 10, 9, 11);
 // Definice pinů pro koncové spínače
 const int endSwitch1Pin = 5;
 const int endSwitch2Pin = 6;
+int analogRefPin = A0;
 
 // Proměnné pro sledování aktuální pozice motoru a referenčního úhlu
 long currentPosition = 0;
@@ -36,8 +37,8 @@ long referencePosition = 0;
 const float maxDegreesPerSecond = 2.5;
 const float stepsPerDegree = stepsPerRevolution / 360.0;
 float maxStepsPerSecond = stepsPerDegree * maxDegreesPerSecond;
-const float initSpeed = stepsPerRevolution; // Rychlost 1 otáčka za sekundu
-const float initAcceleration = stepsPerRevolution / 10; // Akcelerace pro inicializaci
+const float initSpeed = stepsPerRevolution * 100; // Rychlost 1 otáčka za sekundu
+const float initAcceleration = stepsPerRevolution * 10; // Akcelerace pro inicializaci
 
 // Stavy tlačítek na TM1638
 const int atReferenceLED = 1;
@@ -81,8 +82,6 @@ void setup() {
 // Inicializace polohy motoru
 void initializePosition() {
   // Nastavení rychlosti a akcelerace pro inicializaci
-  //myStepper.setMaxSpeed(initSpeed);
-  //myStepper.setAcceleration(initAcceleration);
 
   // Zapnutí LED při zahájení inicializace
   tm.writeLed(initLED, true);
@@ -96,7 +95,6 @@ void initializePosition() {
   while (!tm.getButton(6)) {
     myStepper.moveTo(myStepper.currentPosition() + 100);
     myStepper.run();
-    //tm.displayVal(uint8_t digitId, uint8_t val);
   }
   maxPosition = currentPosition;
 
@@ -131,16 +129,20 @@ void loop() {
 
   bool endSwitch1Active = (endSwitch1Input == LOW) | (tm.getButton(6));
   bool endSwitch2Active = (endSwitch1Input == LOW) | (tm.getButton(5));
+  
+  float mappedReference = analogRead(analogRefPin) * (70.0 / 1023.0) - 35.0;
 
   unsigned long currentMillis = millis();
   bool delayInput = currentMillis % 200 >= 0 & currentMillis % 200 <= 10;
 
   // Nastavení maximální rychlosti a akcelerace pro běžný provoz
+  //TODO s tímhle se tomu nechce - nevím co za hodnoty to používá. Nevidím dovnitř
   //myStepper.setMaxSpeed(maxStepsPerSecond);
   //myStepper.setAcceleration(maxStepsPerSecond/10);
 
   // Aktualizace aktuální pozice
   currentPosition = myStepper.currentPosition();
+  //TODO Pozice nebo to druhé nejde - 
   //actualAngle = currentPosition / positionAngleRatio;
   actualAngle = 0;
 
@@ -152,9 +154,8 @@ void loop() {
   // Kontrola tlačítek pro změnu referenčního úhlu a režimu
    if (tm.getButton(3) & delayInput) { // Tlačítko 4 na TM1638 modulu pro přepnutí mezi režimem
     analogMode = !analogMode;
-
-    // Reset referenčního úhlu při přepnutí do analogového režimu
-    if (analogMode) {
+    // Reset referenčního úhlu při přepnutí do digitálního režimu
+    if (!analogMode) {
       referenceAngle = 0;
     }
   } 
@@ -166,15 +167,19 @@ void loop() {
     if (tm.getButton(0) & delayInput) { // Tlačítko 2 na TM1638 modulu pro snížení referenčního úhlu
       referenceAngle = (referenceAngle - 1.0 < minAngle) ? minAngle : referenceAngle - 1.0;
     }
+  } else { 
+    referenceAngle = mappedReference;
   }
 
   // Detekce, zda je aktuální úhel blízko referenčnímu úhlu
   atReference = abs(referenceAngle - actualAngle) <= 0.1;
 
+  // TODO Tohle by mělo dát referenci přímo stepperu
   referencePosition = ((referenceAngle - minAngle) * positionAngleRatio) - minPosition;
 
   // Pohyb motoru
   if (!atReference) {
+    //TODO endswitche asi obráceně nebo něco - nechám na později
     //bool runCwAllowed = !endSwitch1Active & !(currentPosition <= minPosition);
     //bool runCcwAllowed = !endSwitch2Active & !(currentPosition >= maxPosition);
     bool runCwAllowed = true;
@@ -208,11 +213,11 @@ void updateLedIndication() {
 
   // Zobrazení směru otáčení na TM1638
   if (rotationDirection == -1) {
-    tm.writeLed(cwLED, true); // CW
+    tm.writeLed(cwLED, true);
     tm.writeLed(ccwLED, false);
   } else if (rotationDirection == 1){
     tm.writeLed(cwLED, false);
-    tm.writeLed(ccwLED, true); // CCW
+    tm.writeLed(ccwLED, true);
   } else {
     tm.writeLed(cwLED, false);
     tm.writeLed(ccwLED, false);
@@ -226,10 +231,9 @@ void updateLedIndication() {
     tm.writeLed(digitalInputsLED, true);
   }
 
-  // Zapnutí LED pro indikaci dosažení aktuálního úhlu na TM1638
   tm.writeLed(atReferenceLED, atReference);
 
-  // Heartbeat LED na TM1638
+  // Heartbeat
   if (blink(1000)) {
         tm.writeLed(heartbeatLED, true);
     } else {
@@ -242,10 +246,9 @@ void updateDisplayIndication(float angleRef, float angleAct, int rotation) {
   byte display_data[8] = {0x00};
 
   // Define segment codes
-  byte digit_codes[23] = {
+  byte digit_codes[20] = {
       0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F,  // 0-9
-      0x39, 0x77, 0x38, 0x7C, 0x40, 0x80, 0x00,  // C,A,L,b,-,.,
-      0x09, 0x24, 0x12, 0x49, 0x64, 0x52   // rotation positive/negative
+      0x39, 0x77, 0x38, 0x7C, 0x40, 0x80, 0x00, 0x09, 0x24, 0x12   // Ten zbytek
   };
 
   // 1. segment - sign of angleRef
@@ -263,11 +266,11 @@ void updateDisplayIndication(float angleRef, float angleAct, int rotation) {
   }
 
   // 3. segment - units place of angleRef + decimal point
-  display_data[2] = digit_codes[15]; // Decimal point
-  display_data[2] += digit_codes[abs(static_cast<int>(angleRef)) % 10];
+  //display_data[2] = digit_codes[15]; // Decimal point
+  display_data[2] = digit_codes[abs(static_cast<int>(angleRef)) % 10];
 
   // 4. segment - decimal place of angleRef
-  display_data[3] = digit_codes[int(abs(angleRef) * 10) % 10];
+  //display_data[3] = digit_codes[int(abs(angleRef) * 10) % 10];
 
   // 5. segment - rotation
   unsigned long currentMillis = millis();
@@ -279,10 +282,11 @@ void updateDisplayIndication(float angleRef, float angleAct, int rotation) {
           display_data[4] = digit_codes[16]; // Space (no display)
   }
 
+  // Dejme to na pozici 3 místo desetin reference
   if (rotation == -1) {
-    display_data[4] += digit_codes[17 + rotationIndex]; // CW rotation
+    display_data[3] = digit_codes[17 + rotationIndex]; // CW rotation
   } else if (rotation == 1) {
-    display_data[4] += digit_codes[19 - rotationIndex]; // CW rotation
+    display_data[3] = digit_codes[19 - rotationIndex]; // CW rotation
   } 
 
   // 6. segment - tens place of angleAct
@@ -316,7 +320,7 @@ bool blink(unsigned long interval){
   return output;
 }
 
-// Ok, už je to 4x...
+// Ok, už je to 4x, tak to jde do funkce...
 void sendToDisplay(const uint8_t* message, uint8_t length) {
     for (uint8_t i = 0; i < length; i++) {
         tm.displayDig(7 - i, message[i]);
