@@ -1,6 +1,7 @@
 #include <TM1638.h>
 #include <AccelStepper.h>
 
+
 // Pin definice pro TM1638 modul
 #define STB 2 // Strobe digital pin
 #define CLK 3 // clock digital pin
@@ -64,9 +65,13 @@ const uint8_t calibration[] = {0x39, 0x77, 0x38, 0x80, 0x00, 0x00, 0x00, 0x00}; 
 const uint8_t calibrationDone[] = {0x39, 0x77, 0x38, 0x80, 0x5E, 0x3F, 0x54, 0x79}; // CAL.DONE
 const uint8_t callAbb[] = {0x39, 0x77, 0x38, 0x38, 0x00, 0x77, 0x7c, 0x7c}; // Call ABB
 
+const bool debugEnabled = 0;
+
 void setup() {
   // Inicializace TM1638 modulu
-  Serial.begin(115200);
+  Serial.begin(9600);
+  Serial1.begin(9600);
+  debugPrint("Setup started.");
   tm.reset();
   tm.displaySetBrightness(7);
 
@@ -84,10 +89,13 @@ void setup() {
 
   // Inicializace pozice
   initializePosition();
+  debugPrint("Setup finished.");
 }
 
 // Inicializace polohy motoru
 void initializePosition() {
+  debugPrint("Initializing position...");
+
   // Zapnutí LED při zahájení inicializace
   tm.writeLed(initLED, true);
 
@@ -100,34 +108,51 @@ void initializePosition() {
   while (!tm.getButton(5)) {
     myStepper.moveTo(myStepper.currentPosition() - 100);
     myStepper.run();
+    debugPrint("Moving to negative direction, current position: "+ String(myStepper.currentPosition()));
   }
   currentPosition = 0;
+  myStepper.setCurrentPosition(currentPosition);
   minPosition = currentPosition;
+  debugPrint("Reached minimum position.");
 
   // Simulace pohybu do jednoho směru, dokud není stisknuto tlačítko 6 (simulovaný koncový spínač 1)
   while (!tm.getButton(6)) {
     myStepper.moveTo(myStepper.currentPosition() + 100);
     myStepper.run();
+    debugPrint("Moving to positive direction, current position: " + String(myStepper.currentPosition()));
   }
   maxPosition = currentPosition;
-  middlePosition = maxPosition/2;
+  middlePosition = maxPosition / 2;
+  debugPrint("Reached maximum position.");
+
+  debugPrint("Minimum position: " + String(minPosition));
+  debugPrint("Middle position: " + String(middlePosition));
+  debugPrint("Maximum position: " + String(maxPosition));
 
   // Najeď na pozici 0
   myStepper.moveTo(middlePosition);
   while (myStepper.distanceToGo() != 0) {
     myStepper.run();
+    debugPrint("Moving to middle position, distance to go: " + String(myStepper.distanceToGo()));
   }
+  debugPrint("Reached middle position.");
 
   positionRange = maxPosition - minPosition;
   angleRange = maxAngle - minAngle;
 
-  stepsPerDegree = positionRange/angleRange;
+  stepsPerDegree = positionRange / angleRange;
   maxStepsPerSecond = 2.5 * stepsPerDegree;
+
+  debugPrint("Position range: " + String(positionRange));
+  debugPrint("Angle range: " + String(angleRange));
+  debugPrint("Steps per degree: " + String(stepsPerDegree));
+  debugPrint("Max steps per second: " + String(maxStepsPerSecond));
 
   sendToDisplay(calibrationDone, sizeof(calibrationDone));
   
   delay(1000);
   tm.writeLed(initLED, false); // Vypnutí LED po dokončení inicializace
+  debugPrint("Position initialized.");
 }
 
 void loop() {
@@ -156,12 +181,14 @@ void loop() {
 
   // Kontrola tlačítka pro spuštění inicializační fáze (tlačítko 7 na TM1638 modulu)
   if (tm.getButton(7)) {
+    debugPrint("Initialization button pressed.");
     initializePosition();
   }
 
   // Kontrola tlačítek pro změnu referenčního úhlu a režimu
-   if (tm.getButton(3) & delayInput) { // Tlačítko 4 na TM1638 modulu pro přepnutí mezi režimem
+  if (tm.getButton(3) & delayInput) { // Tlačítko 4 na TM1638 modulu pro přepnutí mezi režimem
     analogMode = !analogMode;
+    debugPrint("Analog mode toggled: " + analogMode ? "ON" : "OFF");
     // Reset referenčního úhlu při přepnutí do digitálního režimu
     if (!analogMode) {
       referenceAngle = 0;
@@ -172,12 +199,15 @@ void loop() {
   if (!analogMode) {  
     if (tm.getButton(1) & delayInput) { // Tlačítko 1 na TM1638 modulu pro zvýšení referenčního úhlu
       referenceAngle = (referenceAngle + 1.0 > maxAngle) ? maxAngle : referenceAngle + 1.0;
+      debugPrint("Reference angle increased: " + String(referenceAngle));
     }
     if (tm.getButton(0) & delayInput) { // Tlačítko 2 na TM1638 modulu pro snížení referenčního úhlu
       referenceAngle = (referenceAngle - 1.0 < minAngle) ? minAngle : referenceAngle - 1.0;
+      debugPrint("Reference angle decreased: " + String(referenceAngle));
     }
   } else { 
     referenceAngle = mappedReference;
+    debugPrint("Reference angle set by analog input: " + String(referenceAngle));
   }
 
   // Detekce, zda je aktuální úhel blízko referenčnímu úhlu
@@ -185,6 +215,7 @@ void loop() {
 
   // TODO Tohle by mělo dát referenci pozice přímo stepperu až to bude fungovat
   referencePosition = ((referenceAngle - minAngle) * stepsPerDegree) - minPosition;
+  debugPrint("Reference position: " + String(referencePosition));
 
   // Pohyb motoru
   if (!atReference) {
@@ -197,60 +228,75 @@ void loop() {
       //myStepper.moveTo(referencePosition);
       myStepper.moveTo(myStepper.currentPosition() + 100);
       rotationDirection = 1;
+      debugPrint("Moving CCW to position: " + String(myStepper.currentPosition() + 100));
     } else if (referenceAngle > actualAngle & runCwAllowed) {
       //myStepper.moveTo(referencePosition);
       myStepper.moveTo(myStepper.currentPosition() - 100);
       rotationDirection = -1;
+      debugPrint("Moving CW to position: " + String(myStepper.currentPosition() - 100));
     }
     myStepper.run();
-
   } else { 
     if (myStepper.isRunning()){
       myStepper.stop();
+      debugPrint("Stepper stopped.");
     }
     rotationDirection = 0;
   }  
 
   // Aktualizace indikace
   updateLedIndication();
-  updateDisplayIndication(referenceAngle,actualAngle,rotationDirection);
+  updateDisplayIndication(referenceAngle, actualAngle, rotationDirection);
+
+  delay(100);
 }
 
 // Funkce pro aktualizaci stavu LED TM1638
 void updateLedIndication() {
+  debugPrint("Updating LED indication.");
 
   // Zobrazení směru otáčení na TM1638
   if (rotationDirection == 1) {
     tm.writeLed(cwLED, true);
     tm.writeLed(ccwLED, false);
+    debugPrint("CW LED on, CCW LED off.");
   } else if (rotationDirection == -1){
     tm.writeLed(cwLED, false);
     tm.writeLed(ccwLED, true);
+    debugPrint("CW LED off, CCW LED on.");
   } else {
     tm.writeLed(cwLED, false);
     tm.writeLed(ccwLED, false);
+    debugPrint("CW LED off, CCW LED off.");
   }
 
   if (analogMode){
     tm.writeLed(analogInputsLED, true);
     tm.writeLed(digitalInputsLED, false);
+    debugPrint("Analog mode LED on, Digital mode LED off.");
   } else {
     tm.writeLed(analogInputsLED, false);
     tm.writeLed(digitalInputsLED, true);
+    debugPrint("Analog mode LED off, Digital mode LED on.");
   }
 
   tm.writeLed(atReferenceLED, atReference);
+  Serial1.print("At reference LED: ");
+  debugPrint(atReference ? "ON" : "OFF");
 
   // Heartbeat
   if (blink1s()) {
-        tm.writeLed(heartbeatLED, true);
-    } else {
-        tm.writeLed(heartbeatLED, false);
-    }
+    tm.writeLed(heartbeatLED, true);
+    debugPrint("Heartbeat LED on.");
+  } else {
+    tm.writeLed(heartbeatLED, false);
+    debugPrint("Heartbeat LED off.");
+  }
 }
 
 // Funkce pro aktualizaci zobrazení na TM1638 displeji
 void updateDisplayIndication(float angleRef, float angleAct, int rotation) {
+  debugPrint("Updating display indication.");
   byte display_data[8] = {0x00};
 
   // Define segment codes
@@ -261,32 +307,30 @@ void updateDisplayIndication(float angleRef, float angleAct, int rotation) {
 
   // 1. segment - sign of angleRef
   if (angleRef < 0) {
-      display_data[0] = digit_codes[14]; // Minus sign
+    display_data[0] = digit_codes[14]; // Minus sign
   } else {
-      display_data[0] = digit_codes[16]; // Space (no display)
+    display_data[0] = digit_codes[16]; // Space (no display)
   }
 
   // 2. segment - tens place of angleRef
   if (abs(angleRef) < 10) {
-      display_data[1] = digit_codes[16]; // Space (no display)
+    display_data[1] = digit_codes[16]; // Space (no display)
   } else {
-      display_data[1] = digit_codes[abs(int(angleRef / 10))];
+    display_data[1] = digit_codes[abs(int(angleRef / 10))];
   }
 
   // 3. segment - units place of angleRef + decimal point
-  //display_data[2] = digit_codes[15]; // Decimal point
   display_data[2] = digit_codes[abs(static_cast<int>(angleRef)) % 10];
 
   // 4. segment - decimal place of angleRef
-  //display_data[3] = digit_codes[int(abs(angleRef) * 10) % 10];
 
   // 5. segment - rotation
   int rotationIndex = (currentMillis / 500) % 3;
 
   if (angleAct < 0) {
-          display_data[4] = digit_codes[14]; // Minus sign
+    display_data[4] = digit_codes[14]; // Minus sign
   } else {
-          display_data[4] = digit_codes[16]; // Space (no display)
+    display_data[4] = digit_codes[16]; // Space (no display)
   }
 
   // Dejme to na pozici 3 místo desetin reference
@@ -300,9 +344,9 @@ void updateDisplayIndication(float angleRef, float angleAct, int rotation) {
 
   // 6. segment - tens place of angleAct
   if (abs(angleAct) < 10) {
-      display_data[5] = digit_codes[16]; // Space (no display)
+    display_data[5] = digit_codes[16]; // Space (no display)
   } else {
-      display_data[5] = digit_codes[abs(int(angleAct / 10))];
+    display_data[5] = digit_codes[abs(int(angleAct / 10))];
   }
 
   // 7. segment - units place of angleAct + decimal point
@@ -314,6 +358,7 @@ void updateDisplayIndication(float angleRef, float angleAct, int rotation) {
 
   // Send data to display
   sendToDisplay(display_data, sizeof(display_data));
+  debugPrint("Display updated.");
 }
 
 // S parametrem intervalu by to asi haprovalo kdyby byly volány různé časy
@@ -322,15 +367,23 @@ bool blink1s(){
   static bool output = false;
   int interval = 1000;
   if (currentMillis - previousMillis >= interval) {
-      previousMillis = currentMillis;
-      output = !output; // Přepnout stav
+    previousMillis = currentMillis;
+    output = !output; // Přepnout stav
   }
   return output;
 }
 
 // Ok, už je to 4x, tak to jde do funkce...
 void sendToDisplay(const uint8_t* message, uint8_t length) {
-    for (uint8_t i = 0; i < length; i++) {
-        tm.displayDig(7 - i, message[i]);
-    }
+  debugPrint("Sending data to display.");
+  for (uint8_t i = 0; i < length; i++) {
+    tm.displayDig(7 - i, message[i]);
+  }
+  debugPrint("Data sent to display.");
+}
+
+void debugPrint (String message) {
+  if (debugEnabled) {
+     Serial1.println(message);
+  }   
 }
