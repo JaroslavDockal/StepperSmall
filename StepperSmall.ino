@@ -2,25 +2,35 @@
 #include <AccelStepper.h>
 
 // Pin definice pro TM1638 modul
-#define STB 2 // Strobe digital pin
-#define CLK 3 // clock digital pin
-#define DIO 4 // data digital pin
+#define STB 8 // Strobe digital pin
+#define CLK 9 // clock digital pin
+#define DIO 10 // data digital pin
 
 // TM1638 inicializace
 TM1638 tm(CLK, DIO, STB);
 
+// Define stepper pins
+#define STEERING_DIR_PIN 3
+#define STEERING_STEP_PIN 2
+#define PROPULSION_DIR_PIN 7
+#define PROPULSION_STEP_PIN 6
+
 // Inicializace objektu AccelStepper pro krokový motor
-AccelStepper myStepper(AccelStepper::FULL4WIRE, 8, 10, 9, 11);
+AccelStepper SteeringStepper(AccelStepper::DRIVER, STEERING_STEP_PIN, STEERING_DIR_PIN);
+AccelStepper PropulsionStepper(AccelStepper::DRIVER, PROPULSION_STEP_PIN, PROPULSION_DIR_PIN);
+
+const unsigned long Baudrate = 9600;
 
 // Definice počtu kroků na jednu otáčku
-const int stepsPerRevolution = 64;
+const int stepsPerRevolution = 51400;
 
 // Definice pinů pro koncové spínače
-const int endSwitch1Pin = 5;
-const int endSwitch2Pin = 6;
+const int endSwitch1Pin = 4;
+const int endSwitch2Pin = 5;
 
 // Definice pinu pro analog ref
-int analogRefPin = A0;
+int angleRefPin = A0;
+int speedRefPin = A1;
 
 // Proměnné pro sledování aktuální pozice motoru
 long currentPosition = 0;
@@ -64,11 +74,17 @@ const uint8_t calibration[] = {0x39, 0x77, 0x38, 0x80, 0x00, 0x00, 0x00, 0x00}; 
 const uint8_t calibrationDone[] = {0x39, 0x77, 0x38, 0x80, 0x5E, 0x3F, 0x54, 0x79}; // CAL.DONE
 const uint8_t callAbb[] = {0x39, 0x77, 0x38, 0x38, 0x00, 0x77, 0x7c, 0x7c}; // Call ABB
 
+bool debugEnable = true;
+
+// Proměnné pro sledování úhlu
+float referenceSpeed = 0.0;
+float actualSpeed = 0.0;
+
+String statusWord = "1A2B";
+
 void setup() {
-  // Inicializace TM1638 modulu
-  Serial.begin(115200);
-  tm.reset();
-  tm.displaySetBrightness(7);
+  Serial.begin(Baudrate);  // USB serial communication for debugging
+  Serial1.begin(Baudrate); // Hardware serial communication
 
   // Zavolání funkce pro zobrazení speciálního textu na TM1638 displeji
   sendToDisplay(callAbb, sizeof(callAbb));
@@ -79,8 +95,8 @@ void setup() {
   pinMode(endSwitch2Pin, INPUT_PULLUP);
 
   // Temp for testing
-  myStepper.setMaxSpeed(initSpeed);
-  myStepper.setAcceleration(initAcceleration);
+  SteeringStepper.setMaxSpeed(initSpeed);
+  SteeringStepper.setAcceleration(initAcceleration);
 
   // Inicializace pozice
   initializePosition();
@@ -97,25 +113,25 @@ void initializePosition() {
   delay(2000);
 
   // Simulace pohybu do opačného směru, dokud není stisknuto tlačítko 5 (simulovaný koncový spínač 2)
-  while (!tm.getButton(5)) {
-    myStepper.moveTo(myStepper.currentPosition() - 100);
-    myStepper.run();
+  while (!tm.getButton(static_cast<button_t>(5))) {
+    SteeringStepper.moveTo(SteeringStepper.currentPosition() - 100);
+    SteeringStepper.run();
   }
   currentPosition = 0;
   minPosition = currentPosition;
 
   // Simulace pohybu do jednoho směru, dokud není stisknuto tlačítko 6 (simulovaný koncový spínač 1)
-  while (!tm.getButton(6)) {
-    myStepper.moveTo(myStepper.currentPosition() + 100);
-    myStepper.run();
+  while (!tm.getButton(static_cast<button_t>(6))) {
+    SteeringStepper.moveTo(SteeringStepper.currentPosition() + 100);
+    SteeringStepper.run();
   }
   maxPosition = currentPosition;
   middlePosition = maxPosition/2;
 
   // Najeď na pozici 0
-  myStepper.moveTo(middlePosition);
-  while (myStepper.distanceToGo() != 0) {
-    myStepper.run();
+  SteeringStepper.moveTo(middlePosition);
+  while (SteeringStepper.distanceToGo() != 0) {
+    SteeringStepper.run();
   }
 
   positionRange = maxPosition - minPosition;
@@ -134,12 +150,13 @@ void loop() {
   int endSwitch1Input = digitalRead(endSwitch1Pin);
   int endSwitch2Input = digitalRead(endSwitch2Pin);
 
-  bool endSwitch1Active = (endSwitch1Input == LOW) | (tm.getButton(6));
-  bool endSwitch2Active = (endSwitch1Input == LOW) | (tm.getButton(5));
+  bool endSwitch1Active = (endSwitch1Input == LOW) | (tm.getButton(static_cast<button_t>(6)));
+  bool endSwitch2Active = (endSwitch1Input == LOW) | (tm.getButton(static_cast<button_t>(5)));
 
   currentMillis = millis();
   
-  float mappedReference = analogRead(analogRefPin) * (70.0 / 1023.0) - 35.0;
+  float mappedAngleReference = analogRead(angleRefPin) * (70.0 / 1023.0) - 35.0;
+  float mappedSpeedReference = analogRead(speedRefPin) * (290.0 / 1023.0) - 145.0; 
 
   bool delayInput = currentMillis % 200 >= 0 & currentMillis % 200 <= 10;
 
@@ -149,18 +166,16 @@ void loop() {
   //myStepper.setAcceleration(maxStepsPerSecond/10);
 
   // Aktualizace aktuální pozice
-  currentPosition = myStepper.currentPosition();
-  //TODO Pozice nebo to druhé nejde = Position control nefunguje.
-  //actualAngle = currentPosition / positionAngleRatio;
-  actualAngle = 0;
+  currentPosition = SteeringStepper.currentPosition();
+  actualAngle = currentPosition / stepsPerDegree;
 
   // Kontrola tlačítka pro spuštění inicializační fáze (tlačítko 7 na TM1638 modulu)
-  if (tm.getButton(7)) {
+  if (tm.getButton(static_cast<button_t>(7))) {
     initializePosition();
   }
 
   // Kontrola tlačítek pro změnu referenčního úhlu a režimu
-   if (tm.getButton(3) & delayInput) { // Tlačítko 4 na TM1638 modulu pro přepnutí mezi režimem
+   if (tm.getButton(static_cast<button_t>(3)) & delayInput) { // Tlačítko 4 na TM1638 modulu pro přepnutí mezi režimem
     analogMode = !analogMode;
     // Reset referenčního úhlu při přepnutí do digitálního režimu
     if (!analogMode) {
@@ -170,14 +185,14 @@ void loop() {
 
   // Určení referenčního úhlu
   if (!analogMode) {  
-    if (tm.getButton(1) & delayInput) { // Tlačítko 1 na TM1638 modulu pro zvýšení referenčního úhlu
+    if (tm.getButton(static_cast<button_t>(1)) & delayInput) { // Tlačítko 1 na TM1638 modulu pro zvýšení referenčního úhlu
       referenceAngle = (referenceAngle + 1.0 > maxAngle) ? maxAngle : referenceAngle + 1.0;
     }
-    if (tm.getButton(0) & delayInput) { // Tlačítko 2 na TM1638 modulu pro snížení referenčního úhlu
+    if (tm.getButton(static_cast<button_t>(0)) & delayInput) { // Tlačítko 2 na TM1638 modulu pro snížení referenčního úhlu
       referenceAngle = (referenceAngle - 1.0 < minAngle) ? minAngle : referenceAngle - 1.0;
     }
   } else { 
-    referenceAngle = mappedReference;
+    referenceAngle = mappedAngleReference;
   }
 
   // Detekce, zda je aktuální úhel blízko referenčnímu úhlu
@@ -194,22 +209,29 @@ void loop() {
     bool runCwAllowed = true;
     bool runCcwAllowed = true;
     if (referenceAngle < actualAngle & runCcwAllowed) {
-      //myStepper.moveTo(referencePosition);
-      myStepper.moveTo(myStepper.currentPosition() + 100);
+      SteeringStepper.moveTo(referencePosition);
+      SteeringStepper.moveTo(SteeringStepper.currentPosition() + 100);
       rotationDirection = 1;
     } else if (referenceAngle > actualAngle & runCwAllowed) {
       //myStepper.moveTo(referencePosition);
-      myStepper.moveTo(myStepper.currentPosition() - 100);
+      SteeringStepper.moveTo(SteeringStepper.currentPosition() - 100);
       rotationDirection = -1;
     }
-    myStepper.run();
+    SteeringStepper.run();
 
   } else { 
-    if (myStepper.isRunning()){
-      myStepper.stop();
+    if (SteeringStepper.isRunning()){
+      SteeringStepper.stop();
     }
     rotationDirection = 0;
   }  
+
+  if (abs(mappedSpeedReference) > 7.5 ) {
+    PropulsionStepper.setMaxSpeed((abs(mappedSpeedReference < 15.0)) ? 15.0 : mappedSpeedReference);
+    PropulsionStepper.runSpeed();
+  } else { 
+    PropulsionStepper.stop();
+  }
 
   // Aktualizace indikace
   updateLedIndication();
@@ -333,4 +355,10 @@ void sendToDisplay(const uint8_t* message, uint8_t length) {
     for (uint8_t i = 0; i < length; i++) {
         tm.displayDig(7 - i, message[i]);
     }
+}
+
+void debugPrint(String message) {
+  if (debugEnable) {
+    Serial.println(message);
+  }
 }
