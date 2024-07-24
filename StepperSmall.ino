@@ -53,6 +53,7 @@ const float maxAngle = 35.0;
 float angleRange = maxAngle - minAngle;
 float actualAngle = 0.0;
 float referenceAngle = 0.0;
+float turningVelocity = 0.0;
 
 // Proměnné pro rychlost
 const float minSpeed = 15.0;
@@ -327,6 +328,9 @@ void loop() {
     dirDirection = 0;
   }  
 
+  turningVelocity = stgStepper.speed() / stepsPerDegree;
+  debugPrint("Turning velocity: " + String(turningVelocity), 2);
+
   if (abs(mappedSpeedReference) > (minSpeed/2))  {
     if (abs(mappedSpeedReference) < minSpeed)  {
       referenceSpeed = minSpeed;
@@ -353,6 +357,8 @@ void loop() {
 */
   propStepper.setSpeed(9600);
   propStepper.runSpeed();
+  actualSpeed = propStepper.speed();
+  debugPrint("Propulsion speed: " + String(actualSpeed), 2);
 
   // Aktualizace indikace
   updateLedIndication();
@@ -435,7 +441,7 @@ void sendNMEA() {
   debugPrint("Status word: " + String(statusWord),2);
 
   // Sestavení NMEA zprávy
-  String nmeaMessage = "$ADPXB," + String(referenceAngleFb, 1) + "," + String(referenceSpeedFb, 1) + "," + String(actualAngle, 1) + "," + String(actualSpeed, 1) + "," + statusWord;
+  String nmeaMessage = "$ADPXB," + String(referenceAngleFb, 1) + "," + String(referenceSpeedFb, 1) + "," + String(actualAngle, 1) + "," + String(actualSpeed, 1) + "," + String(turningVelocity, 1) + "," + statusWord;
 
   // Výpočet checksumu
   int checksum = 0;
